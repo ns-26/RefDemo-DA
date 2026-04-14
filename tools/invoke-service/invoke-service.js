@@ -3,31 +3,47 @@ import DA_SDK from 'https://da.live/nx/utils/sdk.js';
 
 const DEFAULT_SERVICE_URL = 'https://hook.app.workfrontfusion.com/xot9mamgl12su5dteagfw64f6lklf7ge';
 
-const PHASE = { CONFIRM: 'confirm', LOADING: 'loading', RESULT: 'result' };
+/* ── SVG icons (inline to avoid external deps) ───────────────────────── */
+
+const ICON_SUCCESS = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32" fill="none">
+  <circle cx="12" cy="12" r="11" fill="#12805c"/>
+  <path d="M7 12.5l3 3 7-7" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+
+const ICON_FAILURE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32" fill="none">
+  <circle cx="12" cy="12" r="11" fill="#d7373f"/>
+  <path d="M8 8l8 8M16 8l-8 8" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+</svg>`;
+
+/* ── Placeholders config ─────────────────────────────────────────────── */
 
 function buildPlaceholdersUrl(org, repo) {
-  return `https://admin.da.live/source/${org}/${repo}/placeholders.json`;
+  return `https://main--${repo}--${org}.aem.live/config/placeholder.json`;
 }
 
-async function fetchPlaceholders(org, repo, token) {
+async function fetchPlaceholders(org, repo) {
   const url = buildPlaceholdersUrl(org, repo);
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Placeholders fetch failed: ${resp.status}`);
   const json = await resp.json();
 
   const lookup = {};
-  const rows = json.data || json[':names']?.flatMap((name) => json[name]?.data) || [];
-  rows.forEach((row) => {
-    if (row.Key || row.key) lookup[(row.Key || row.key).toLowerCase()] = row.Text || row.text || '';
+  (json.data || []).forEach((row) => {
+    if (row.key) lookup[row.key.toLowerCase()] = row.value || '';
   });
+
+  let rawPayload = lookup['external-service-payload'] || '';
+  if (rawPayload.startsWith("'") && rawPayload.endsWith("'")) {
+    rawPayload = rawPayload.slice(1, -1);
+  }
 
   return {
     externalServiceUrl: lookup['external-service-url'] || '',
-    externalServicePayload: lookup['external-service-payload'] || '',
+    externalServicePayload: rawPayload,
   };
 }
+
+/* ── User profile ────────────────────────────────────────────────────── */
 
 async function fetchUserProfile(token) {
   try {
@@ -47,12 +63,43 @@ async function fetchUserProfile(token) {
   }
 }
 
+/* ── Resolve org / repo from DA SDK context ──────────────────────────── */
+
+function resolveOrgRepo(context) {
+  if (context.org && context.repo) {
+    return { org: context.org, repo: context.repo, path: context.path || '/' };
+  }
+
+  const url = context.url || context.location || context.href || '';
+  const hashPath = url.includes('#') ? url.split('#')[1] : '';
+  const segments = (hashPath || '').split('/').filter(Boolean);
+  if (segments.length >= 2) {
+    return { org: segments[0], repo: segments[1], path: `/${segments.slice(2).join('/')}` };
+  }
+
+  const values = Object.values(context).filter((v) => typeof v === 'string');
+  const slashVal = values.find((v) => v.split('/').filter(Boolean).length >= 2);
+  if (slashVal) {
+    const parts = slashVal.split('/').filter(Boolean);
+    return { org: parts[0], repo: parts[1], path: `/${parts.slice(2).join('/')}` };
+  }
+
+  throw new Error(`Could not resolve org/repo from context: ${JSON.stringify(context)}`);
+}
+
+/* ── External service call ───────────────────────────────────────────── */
+
 async function invokeExternalService(token, context) {
-  const { org, repo, path } = context;
+  // eslint-disable-next-line no-console
+  console.log('[invoke-service] DA SDK context →', JSON.stringify(context, null, 2));
+
+  const { org, repo, path } = resolveOrgRepo(context);
+  // eslint-disable-next-line no-console
+  console.log('[invoke-service] Resolved →', { org, repo, path });
 
   const [profile, config] = await Promise.all([
     fetchUserProfile(token),
-    fetchPlaceholders(org, repo, token).catch((err) => {
+    fetchPlaceholders(org, repo).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn('[invoke-service] Placeholders fetch failed, using defaults:', err);
       return { externalServiceUrl: '', externalServicePayload: '' };
@@ -98,65 +145,80 @@ async function invokeExternalService(token, context) {
   return resp.json();
 }
 
-function renderPhase(container, phase, { onConfirm, onCancel, onClose, isSuccess, message }) {
-  container.innerHTML = '';
+/* ── UI rendering with Spectrum CSS ──────────────────────────────────── */
 
-  if (phase === PHASE.CONFIRM) {
-    container.innerHTML = `
-      <div class="invoke-service-panel">
-        <p class="invoke-service-message">Invoke the external service for this document?</p>
-        <div class="invoke-service-actions">
-          <button class="invoke-service-btn secondary" id="invoke-cancel">Cancel</button>
-          <button class="invoke-service-btn primary" id="invoke-confirm">Confirm</button>
-        </div>
-      </div>`;
-    container.querySelector('#invoke-cancel').addEventListener('click', onCancel);
-    container.querySelector('#invoke-confirm').addEventListener('click', onConfirm);
-  }
-
-  if (phase === PHASE.LOADING) {
-    container.innerHTML = `
-      <div class="invoke-service-panel">
-        <div class="invoke-service-loading">
-          <div class="invoke-service-spinner"></div>
-          <p class="invoke-service-message">Executing external service…</p>
-        </div>
-      </div>`;
-  }
-
-  if (phase === PHASE.RESULT) {
-    const icon = isSuccess
-      ? '<span class="invoke-service-icon success">&#10003;</span>'
-      : '<span class="invoke-service-icon failure">&#10007;</span>';
-    const label = isSuccess ? 'Success' : 'Failed';
-
-    container.innerHTML = `
-      <div class="invoke-service-panel">
-        <div class="invoke-service-result">
-          ${icon}
-          <p class="invoke-service-label">${label}</p>
-          <p class="invoke-service-detail">${message}</p>
-        </div>
-        <div class="invoke-service-actions">
-          <button class="invoke-service-btn primary" id="invoke-close">Close</button>
-        </div>
-      </div>`;
-    container.querySelector('#invoke-close').addEventListener('click', onClose);
-  }
+function renderConfirm(root, { onConfirm, onCancel }) {
+  root.innerHTML = `
+    <div class="invoke-service-panel">
+      <p class="invoke-service-message">Invoke the external service for this document?</p>
+      <div class="invoke-service-actions">
+        <button class="spectrum-Button spectrum-Button--sizeM spectrum-Button--secondary spectrum-Button--outline" id="invoke-cancel">
+          <span class="spectrum-Button-label">Cancel</span>
+        </button>
+        <button class="spectrum-Button spectrum-Button--sizeM spectrum-Button--accent spectrum-Button--fill" id="invoke-confirm">
+          <span class="spectrum-Button-label">Confirm</span>
+        </button>
+      </div>
+    </div>`;
+  root.querySelector('#invoke-cancel').addEventListener('click', onCancel);
+  root.querySelector('#invoke-confirm').addEventListener('click', onConfirm);
 }
+
+function renderLoading(root) {
+  root.innerHTML = `
+    <div class="invoke-service-panel">
+      <div class="invoke-service-loading">
+        <div class="spectrum-ProgressCircle spectrum-ProgressCircle--indeterminate spectrum-ProgressCircle--small">
+          <div class="spectrum-ProgressCircle-track"></div>
+          <div class="spectrum-ProgressCircle-fills">
+            <div class="spectrum-ProgressCircle-fillMask1">
+              <div class="spectrum-ProgressCircle-fillSubMask1">
+                <div class="spectrum-ProgressCircle-fill"></div>
+              </div>
+            </div>
+            <div class="spectrum-ProgressCircle-fillMask2">
+              <div class="spectrum-ProgressCircle-fillSubMask2">
+                <div class="spectrum-ProgressCircle-fill"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="invoke-service-message">Executing external service…</p>
+      </div>
+    </div>`;
+}
+
+function renderResult(root, { isSuccess, message, onClose }) {
+  const icon = isSuccess ? ICON_SUCCESS : ICON_FAILURE;
+  const label = isSuccess ? 'Success' : 'Failed';
+
+  root.innerHTML = `
+    <div class="invoke-service-panel">
+      <div class="invoke-service-result">
+        <div class="invoke-service-icon">${icon}</div>
+        <p class="invoke-service-label">${label}</p>
+        <p class="invoke-service-detail">${message}</p>
+      </div>
+      <div class="invoke-service-actions">
+        <button class="spectrum-Button spectrum-Button--sizeM spectrum-Button--accent spectrum-Button--fill" id="invoke-close">
+          <span class="spectrum-Button-label">Close</span>
+        </button>
+      </div>
+    </div>`;
+  root.querySelector('#invoke-close').addEventListener('click', onClose);
+}
+
+/* ── Init ─────────────────────────────────────────────────────────────── */
 
 (async function init() {
   const { context, token, actions } = await DA_SDK;
-
-  const container = document.createElement('div');
-  container.className = 'invoke-service-container';
-  document.body.appendChild(container);
+  const root = document.getElementById('invoke-service-root');
 
   const handlers = {
     onCancel: () => actions.closeLibrary(),
     onClose: () => actions.closeLibrary(),
     onConfirm: async () => {
-      renderPhase(container, PHASE.LOADING, handlers);
+      renderLoading(root);
       let isSuccess = false;
       let message = '';
       try {
@@ -169,11 +231,9 @@ function renderPhase(container, phase, { onConfirm, onCancel, onClose, isSuccess
         isSuccess = false;
         message = err.message || 'An unexpected error occurred.';
       }
-      renderPhase(container, PHASE.RESULT, { ...handlers, isSuccess, message });
+      renderResult(root, { isSuccess, message, onClose: handlers.onClose });
     },
-    isSuccess: false,
-    message: '',
   };
 
-  renderPhase(container, PHASE.CONFIRM, handlers);
+  renderConfirm(root, handlers);
 }());

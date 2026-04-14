@@ -17,6 +17,13 @@
       "event": "experimentation"
     },
     {
+      "id": "invoke-external-service",
+      "title": "Invoke External Service",
+      "environments": ["edit"],
+      "daLibrary": true,
+      "url": "https://external-service-integration--refdemo-da--aemxsc.aem.live/tools/invoke-service.html"
+    },
+    {
       "id": "aem-labs",
       "title": "AEM Labs",
       "environments": ["edit"],
